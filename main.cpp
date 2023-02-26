@@ -146,7 +146,7 @@ const char* PixelShaderCode =
 
 
 #define LOG(msg, ...) do { char OtherStuff[1024] = {}; \
-		snprintf(OtherStuff, sizeof(OtherStuff), msg, ## __VA_ARGS__); \
+		snprintf(OtherStuff, sizeof(OtherStuff), msg "\n", ## __VA_ARGS__); \
 		OutputDebugStringA(OtherStuff); \
 	} while(0)
 
@@ -515,6 +515,53 @@ ID3D12DescriptorHeap* GetSRVHeapForTexture(ID3D12Device* Device, ID3D12Resource*
 	return TextureSRVHeap;
 }
 
+struct GPUTimer
+{
+	ID3D12QueryHeap* QueryHeap = nullptr;
+
+	ID3D12Resource* TimestampReadback = nullptr;
+
+	void Init(ID3D12Device* Device)
+	{
+		D3D12_QUERY_HEAP_DESC QueryHeapDesc = {};
+		QueryHeapDesc.Count = 1024;
+		QueryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+		HRESULT hr = Device->CreateQueryHeap(&QueryHeapDesc, IID_PPV_ARGS(&QueryHeap));
+		ASSERT(SUCCEEDED(hr));
+
+		D3D12_RESOURCE_DESC Desc = CD3DX12_RESOURCE_DESC::Buffer(QueryHeapDesc.Count * sizeof(uint64_t));
+
+		D3D12_HEAP_PROPERTIES Props = {};
+		Props.Type = D3D12_HEAP_TYPE_READBACK;
+
+		hr = Device->CreateCommittedResource(&Props, D3D12_HEAP_FLAG_NONE, &Desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&TimestampReadback));
+		ASSERT(SUCCEEDED(hr));
+	}
+
+	void StartTiming(ID3D12GraphicsCommandList* CommandList)
+	{
+		CommandList->EndQuery(QueryHeap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+	}
+
+	void EndTiming(ID3D12GraphicsCommandList* CommandList)
+	{
+		CommandList->EndQuery(QueryHeap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+		CommandList->ResolveQueryData(QueryHeap, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, TimestampReadback, 0);
+	}
+
+	void GetTiming(uint64_t* OutStart, uint64_t* OutEnd)
+	{
+		void* pPixelData = nullptr;
+		HRESULT hr = TimestampReadback->Map(0, nullptr, &pPixelData);
+		ASSERT(SUCCEEDED(hr));
+
+		*OutStart = ((uint64_t*)pPixelData)[0];
+		*OutEnd = ((uint64_t*)pPixelData)[1];
+
+		TimestampReadback->Unmap(0, nullptr);
+	}
+};
+
 int main(int argc, char** argv) {
 
 	ID3D12Debug1* D3D12DebugLayer = nullptr;
@@ -570,6 +617,10 @@ int main(int argc, char** argv) {
 	ASSERT(hr);
 
 
+	// NOTE: Requires Developer Mode
+	Device->SetStablePowerState(true);
+
+
 	ID3DBlob* VSByteCode = nullptr;
 	ID3DBlob* PSByteCode = nullptr;
 	ID3DBlob* ErrorMsg = nullptr;
@@ -601,6 +652,9 @@ int main(int argc, char** argv) {
 	hr = Device->CreateCommandQueue(&CmdQueueDesc, IID_PPV_ARGS(&CommandQueue));
 	ASSERT(SUCCEEDED(hr));
 
+	uint64_t TimestampFreq = 0;
+	CommandQueue->GetTimestampFrequency(&TimestampFreq);
+
 	{
 		ID3D12CommandAllocator* CommandAllocator = nullptr;
 		hr = Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&CommandAllocator));
@@ -616,6 +670,10 @@ int main(int argc, char** argv) {
 		ID3D12Fence* ExecFence = nullptr;
 		ASSERT(SUCCEEDED(Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&ExecFence))));
 		uint64_t NextValueToSignal = 1;
+
+		GPUTimer Timer;
+
+		Timer.Init(Device);
 
 		// Pixel Shader Copy
 		{
@@ -665,46 +723,63 @@ int main(int argc, char** argv) {
 
 			// CommandList State
 
-			CommandList->SetPipelineState(PixelPSO);
-			CommandList->SetGraphicsRootSignature(PixelRootSig);
-
-			CommandList->RSSetViewports(1, &Viewport);
-			CommandList->RSSetScissorRects(1, &ScissorRect);
-			CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
-
-			CommandList->SetDescriptorHeaps(1, &SrcSRV);
-			CommandList->SetGraphicsRootDescriptorTable(0, SrcSRV->GetGPUDescriptorHandleForHeapStart());
-
+			for (int iter = 0; iter < 1024; iter++)
 			{
-				D3D12_VERTEX_BUFFER_VIEW vtbView = {};
-				vtbView.BufferLocation = VertexBufferRes->GetGPUVirtualAddress();
-				vtbView.SizeInBytes = VertexBufferSize;
-				vtbView.StrideInBytes = 16;
+				CommandList->SetPipelineState(PixelPSO);
+				CommandList->SetGraphicsRootSignature(PixelRootSig);
 
-				CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-				CommandList->IASetVertexBuffers(0, 1, &vtbView);
+				CommandList->RSSetViewports(1, &Viewport);
+				CommandList->RSSetScissorRects(1, &ScissorRect);
+				CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+				CommandList->SetDescriptorHeaps(1, &SrcSRV);
+				CommandList->SetGraphicsRootDescriptorTable(0, SrcSRV->GetGPUDescriptorHandleForHeapStart());
+
+				{
+					D3D12_VERTEX_BUFFER_VIEW vtbView = {};
+					vtbView.BufferLocation = VertexBufferRes->GetGPUVirtualAddress();
+					vtbView.SizeInBytes = VertexBufferSize;
+					vtbView.StrideInBytes = 16;
+
+					CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+					CommandList->IASetVertexBuffers(0, 1, &vtbView);
+				}
+
+				Timer.StartTiming(CommandList);
+
+				CommandList->DrawInstanced(VertexCount, 1, 0, 0);
+
+				Timer.EndTiming(CommandList);
+
+				// Copy render target data to readback texture
+				//CopyRenderTargetDataToReadback(CommandList, DestResource, ReadbackRT, RTWidth, RTHeight, RTWidth * bpp);
+
+				CommandList->Close();
+
+				ID3D12CommandList* CommandLists[] = { CommandList };
+				CommandQueue->ExecuteCommandLists(1, CommandLists);
+
+				CommandQueue->Signal(ExecFence, NextValueToSignal);
+
+				HANDLE hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+				ExecFence->SetEventOnCompletion(NextValueToSignal, hEvent);
+				WaitForSingleObject(hEvent, INFINITE);
+				CloseHandle(hEvent);
+
+				NextValueToSignal++;
+
+				//WriteReadbackToFile(ReadbackRT, RTWidth, RTHeight);
+
+				uint64_t StartTS = 0;
+				uint64_t EndTS = 0;
+				Timer.GetTiming(&StartTS, &EndTS);
+
+				uint64_t TotalTS = EndTS - StartTS;
+				double TotalUsec = ((double)TotalTS) / TimestampFreq * (1000.0 * 1000.0);
+				LOG("Took %5.1f usec (%llu ticks) for pixel shader copy (%4d x %4d)", TotalUsec, TotalTS, RTWidth, RTHeight);
+
+				CommandList->Reset(CommandAllocator, nullptr);
 			}
-
-			CommandList->DrawInstanced(VertexCount, 1, 0, 0);
-
-			// Copy render target data to readback texture
-			CopyRenderTargetDataToReadback(CommandList, DestResource, ReadbackRT, RTWidth, RTHeight, RTWidth * bpp);
-
-			CommandList->Close();
-
-			ID3D12CommandList* CommandLists[] = { CommandList };
-			CommandQueue->ExecuteCommandLists(1, CommandLists);
-
-			CommandQueue->Signal(ExecFence, NextValueToSignal);
-
-			HANDLE hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-			ExecFence->SetEventOnCompletion(NextValueToSignal, hEvent);
-			WaitForSingleObject(hEvent, INFINITE);
-			CloseHandle(hEvent);
-
-			NextValueToSignal++;
-
-			WriteReadbackToFile(ReadbackRT, RTWidth, RTHeight);
 		}
 
 		// Since executing a command list will be asynchronous on another thread,
