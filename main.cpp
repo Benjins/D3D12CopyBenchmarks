@@ -742,7 +742,7 @@ int main(int argc, char** argv) {
 			Adapter->GetDesc(&AdapterDesc);
 
 			// Avoid the WARP adapter or Intel (which will likely be integrated)
-			if (AdapterDesc.VendorId != 0x1414 && AdapterDesc.VendorId == 0x8086) {
+			if (AdapterDesc.VendorId != 0x1414 && AdapterDesc.VendorId != 0x8086) {
 				ChosenAdapter = Adapter;
 			}
 
