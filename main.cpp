@@ -144,6 +144,51 @@ const char* PixelShaderCode =
 "	return inputTexture.SampleLevel(TexSampler, ((input.pos.xy) / 1024.0), 0);\n"
 "}";
 
+const char* ComputeShaderCode1x1 =
+"RWTexture2D<float4> OutTexture;\n"
+"Texture2D<float4> InTexture;\n"
+"[numthreads(1, 1, 1)]\n"
+"void CSMain(uint3 tid : SV_DispatchThreadID) {\n"
+"    OutTexture[tid.xy] = InTexture[tid.xy];\n"
+"}\n"
+;
+
+const char* ComputeShaderCode2x2 =
+"RWTexture2D<float4> OutTexture;\n"
+"Texture2D<float4> InTexture;\n"
+"[numthreads(2, 2, 1)]\n"
+"void CSMain(uint3 tid : SV_DispatchThreadID) {\n"
+"    OutTexture[tid.xy] = InTexture[tid.xy];\n"
+"}\n"
+;
+
+const char* ComputeShaderCode4x4 =
+"RWTexture2D<float4> OutTexture;\n"
+"Texture2D<float4> InTexture;\n"
+"[numthreads(4, 4, 1)]\n"
+"void CSMain(uint3 tid : SV_DispatchThreadID) {\n"
+"    OutTexture[tid.xy] = InTexture[tid.xy];\n"
+"}\n"
+;
+
+const char* ComputeShaderCode8x8 =
+"RWTexture2D<float4> OutTexture;\n"
+"Texture2D<float4> InTexture;\n"
+"[numthreads(8, 8, 1)]\n"
+"void CSMain(uint3 tid : SV_DispatchThreadID) {\n"
+"    OutTexture[tid.xy] = InTexture[tid.xy];\n"
+"}\n"
+;
+
+const char* ComputeShaderCode16x16 =
+"RWTexture2D<float4> OutTexture;\n"
+"Texture2D<float4> InTexture;\n"
+"[numthreads(16, 16, 1)]\n"
+"void CSMain(uint3 tid : SV_DispatchThreadID) {\n"
+"    OutTexture[tid.xy] = InTexture[tid.xy];\n"
+"}\n"
+;
+
 
 #define LOG(msg, ...) do { char OtherStuff[1024] = {}; \
 		snprintf(OtherStuff, sizeof(OtherStuff), msg "\n", ## __VA_ARGS__); \
@@ -382,7 +427,7 @@ ID3D12Resource* AllocateVertexBuffer(ID3D12Device* Device, int BufferSize)
 	return VertexBufferRes;
 }
 
-void SetTextureUploadRandomBytes(ID3D12Resource* TextureUploadResource, int BufferSize, int Width, int Height, int Pitch)
+void SetTextureUploadRandomBytes(const char* Filename, ID3D12Resource* TextureUploadResource, int BufferSize, int Width, int Height, int Pitch)
 {
 	void* pTexturePixelData = nullptr;
 	HRESULT hr = TextureUploadResource->Map(0, nullptr, &pTexturePixelData);
@@ -393,12 +438,12 @@ void SetTextureUploadRandomBytes(ID3D12Resource* TextureUploadResource, int Buff
 		((uint8_t*)pTexturePixelData)[i] = (uint8_t)(rand() % 256);
 	}
 
-	stbi_write_png("random_bytes_in.png", Width, Height, 4, pTexturePixelData, Pitch);
+	stbi_write_png(Filename, Width, Height, 4, pTexturePixelData, Pitch);
 
 	TextureUploadResource->Unmap(0, nullptr);
 }
 
-void UploadTextureResource(ID3D12GraphicsCommandList* CommandList, ID3D12Resource* TextureUploadResource, ID3D12Resource* TextureResource, int32 Width, int32 Height, int32 Pitch)
+void UploadTextureResource(ID3D12GraphicsCommandList* CommandList, ID3D12Resource* TextureUploadResource, ID3D12Resource* TextureResource, int32 Width, int32 Height, int32 Pitch, D3D12_RESOURCE_STATES StartingState)
 {
 	D3D12_TEXTURE_COPY_LOCATION CopyLocSrc = {}, CopyLocDst = {};
 	CopyLocSrc.pResource = TextureUploadResource;
@@ -419,7 +464,7 @@ void UploadTextureResource(ID3D12GraphicsCommandList* CommandList, ID3D12Resourc
 		Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 		Barrier.Transition.pResource = TextureResource;
 		Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-		Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+		Barrier.Transition.StateBefore = StartingState;
 		Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
 
 		CommandList->ResourceBarrier(1, &Barrier);
@@ -433,13 +478,13 @@ void UploadTextureResource(ID3D12GraphicsCommandList* CommandList, ID3D12Resourc
 		Barrier.Transition.pResource = TextureResource;
 		Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 		Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-		Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+		Barrier.Transition.StateAfter = StartingState;
 
 		CommandList->ResourceBarrier(1, &Barrier);
 	}
 }
 
-void CopyRenderTargetDataToReadback(ID3D12GraphicsCommandList* CommandList, ID3D12Resource* DestResource, ID3D12Resource* ReadbackRT, int RTWidth, int RTHeight, int Pitch)
+void CopyRenderTargetDataToReadback(ID3D12GraphicsCommandList* CommandList, ID3D12Resource* DestResource, ID3D12Resource* ReadbackRT, int RTWidth, int RTHeight, int Pitch, D3D12_RESOURCE_STATES StartingState)
 {
 	D3D12_TEXTURE_COPY_LOCATION CopyLocSrc = {}, CopyLocDst = {};
 	CopyLocDst.pResource = ReadbackRT;
@@ -455,13 +500,21 @@ void CopyRenderTargetDataToReadback(ID3D12GraphicsCommandList* CommandList, ID3D
 	CopyLocSrc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
 	CopyLocSrc.SubresourceIndex = 0;
 
+	//{
+	//	D3D12_RESOURCE_BARRIER Barrier = {};
+	//	Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	//	Barrier.UAV.pResource = DestResource;
+	//
+	//	CommandList->ResourceBarrier(1, &Barrier);
+	//}
+
 	// Transition dest from render target to copy source
 	{
 		D3D12_RESOURCE_BARRIER Barrier = {};
 		Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 		Barrier.Transition.pResource = DestResource;
 		Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-		Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+		Barrier.Transition.StateBefore = StartingState;
 		Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
 
 		CommandList->ResourceBarrier(1, &Barrier);
@@ -476,19 +529,19 @@ void CopyRenderTargetDataToReadback(ID3D12GraphicsCommandList* CommandList, ID3D
 		Barrier.Transition.pResource = DestResource;
 		Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 		Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-		Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+		Barrier.Transition.StateAfter = StartingState;
 
 		CommandList->ResourceBarrier(1, &Barrier);
 	}
 }
 
-void WriteReadbackToFile(ID3D12Resource* RTReadback, int RTWidth, int RTHeight)
+void WriteReadbackToFile(const char* Filename, ID3D12Resource * RTReadback, int RTWidth, int RTHeight)
 {
 	void* pPixelData = nullptr;
 	HRESULT hr = RTReadback->Map(0, nullptr, &pPixelData);
 	ASSERT(SUCCEEDED(hr));
 
-	stbi_write_png("random_bytes_out.png", RTWidth, RTHeight, 4, pPixelData, 0);
+	stbi_write_png(Filename, RTWidth, RTHeight, 4, pPixelData, 0);
 
 	RTReadback->Unmap(0, nullptr);
 }
@@ -513,6 +566,107 @@ ID3D12DescriptorHeap* GetSRVHeapForTexture(ID3D12Device* Device, ID3D12Resource*
 	Device->CreateShaderResourceView(Texture, &srvDesc, TextureSRVHeap->GetCPUDescriptorHandleForHeapStart());
 
 	return TextureSRVHeap;
+}
+
+ID3D12DescriptorHeap* GetSRVUAVHeapForTextures(ID3D12Device* Device, ID3D12Resource* SRVTexture, ID3D12Resource* UAVTexture)
+{
+	ID3D12DescriptorHeap* TextureUAVHeap = nullptr;
+
+	// TODO: Descriptor heap needs to go somewhere, maybe on texture?
+	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+	heapDesc.NumDescriptors = 2;
+	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+	HRESULT hr = Device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&TextureUAVHeap));
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Texture2D.MipLevels = 1;
+
+	D3D12_UNORDERED_ACCESS_VIEW_DESC UAVDesc = {};
+	UAVDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+	UAVDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	UAVDesc.Texture2D.MipSlice = 0;
+
+	D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = TextureUAVHeap->GetCPUDescriptorHandleForHeapStart();
+	Device->CreateShaderResourceView(SRVTexture, &srvDesc, CPUHandle);
+
+	CPUHandle.ptr += Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	Device->CreateUnorderedAccessView(UAVTexture, nullptr, &UAVDesc, CPUHandle);
+
+	return TextureUAVHeap;
+}
+
+ID3D12RootSignature* CreateComputeRootSig(ID3D12Device* Device)
+{
+	D3D12_ROOT_SIGNATURE_DESC RootSigDesc = {};
+
+
+	D3D12_DESCRIPTOR_RANGE DescriptorRanges[2] = {};
+	DescriptorRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	DescriptorRanges[0].BaseShaderRegister = 0;
+	DescriptorRanges[0].NumDescriptors = 1;
+	DescriptorRanges[0].OffsetInDescriptorsFromTableStart = 0;
+
+	DescriptorRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+	DescriptorRanges[1].BaseShaderRegister = 0;
+	DescriptorRanges[1].NumDescriptors = 1;
+	DescriptorRanges[1].OffsetInDescriptorsFromTableStart = 0;
+
+	D3D12_ROOT_PARAMETER RootParams[2] = {};
+	RootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+	RootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	RootParams[0].DescriptorTable.NumDescriptorRanges = 1;
+	RootParams[0].DescriptorTable.pDescriptorRanges = &DescriptorRanges[0];
+
+	RootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+	RootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	RootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+	RootParams[1].DescriptorTable.pDescriptorRanges = &DescriptorRanges[1];
+
+	RootSigDesc.NumParameters = 2;
+	RootSigDesc.pParameters = &RootParams[0];
+
+	ID3DBlob* RootSigBlob = nullptr;
+	ID3DBlob* RootSigErrorBlob = nullptr;
+
+	HRESULT hr = D3D12SerializeRootSignature(&RootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &RootSigBlob, &RootSigErrorBlob);
+
+	if (!SUCCEEDED(hr))
+	{
+		const char* ErrStr = (const char*)RootSigErrorBlob->GetBufferPointer();
+		int32 ErrStrLen = RootSigErrorBlob->GetBufferSize();
+		LOG("Root Sig Err: '%.*s'", ErrStrLen, ErrStr);
+	}
+
+	ASSERT(SUCCEEDED(hr));
+
+	ID3D12RootSignature* RootSig = nullptr;
+	hr = Device->CreateRootSignature(0, RootSigBlob->GetBufferPointer(), RootSigBlob->GetBufferSize(), IID_PPV_ARGS(&RootSig));
+
+	ASSERT(SUCCEEDED(hr));
+
+	return RootSig;
+}
+
+ID3D12PipelineState* CreateComputePSO(ID3D12Device* Device, ID3D12RootSignature* RootSig, ID3DBlob* CSByteCode)
+{
+	ID3D12PipelineState* PSO = nullptr;
+	
+	D3D12_SHADER_BYTECODE ComputeShaderByteCode;
+	ComputeShaderByteCode.pShaderBytecode = CSByteCode->GetBufferPointer();
+	ComputeShaderByteCode.BytecodeLength = CSByteCode->GetBufferSize();
+
+	D3D12_COMPUTE_PIPELINE_STATE_DESC PSODesc = {};
+	PSODesc.CS = ComputeShaderByteCode;
+	PSODesc.pRootSignature = RootSig;
+
+	HRESULT hr = Device->CreateComputePipelineState(&PSODesc, IID_PPV_ARGS(&PSO));
+	ASSERT(SUCCEEDED(hr));
+
+	return PSO;
 }
 
 struct GPUTimer
@@ -564,9 +718,9 @@ struct GPUTimer
 
 int main(int argc, char** argv) {
 
-	ID3D12Debug1* D3D12DebugLayer = nullptr;
-	D3D12GetDebugInterface(IID_PPV_ARGS(&D3D12DebugLayer));
-	D3D12DebugLayer->EnableDebugLayer();
+	//ID3D12Debug1* D3D12DebugLayer = nullptr;
+	//D3D12GetDebugInterface(IID_PPV_ARGS(&D3D12DebugLayer));
+	//D3D12DebugLayer->EnableDebugLayer();
 
 
 	IDXGIFactory2* DXGIFactory = nullptr;
@@ -588,7 +742,7 @@ int main(int argc, char** argv) {
 			Adapter->GetDesc(&AdapterDesc);
 
 			// Avoid the WARP adapter or Intel (which will likely be integrated)
-			if (AdapterDesc.VendorId != 0x1414 && AdapterDesc.VendorId != 0x8686) {
+			if (AdapterDesc.VendorId != 0x1414 && AdapterDesc.VendorId == 0x8086) {
 				ChosenAdapter = Adapter;
 			}
 
@@ -623,6 +777,11 @@ int main(int argc, char** argv) {
 
 	ID3DBlob* VSByteCode = nullptr;
 	ID3DBlob* PSByteCode = nullptr;
+	ID3DBlob* CSByteCode1x1 = nullptr;
+	ID3DBlob* CSByteCode2x2 = nullptr;
+	ID3DBlob* CSByteCode4x4 = nullptr;
+	ID3DBlob* CSByteCode8x8 = nullptr;
+	ID3DBlob* CSByteCode16x16 = nullptr;
 	ID3DBlob* ErrorMsg = nullptr;
 	UINT CompilerFlags = 0;
 	hr = D3DCompile(VertexShaderCode, strlen(VertexShaderCode), "<VS_SOURCE>", nullptr, nullptr, "VSMain", "vs_5_0", CompilerFlags, 0, &VSByteCode, &ErrorMsg);
@@ -641,9 +800,45 @@ int main(int argc, char** argv) {
 	}
 	ASSERT(SUCCEEDED(hr));
 
+	hr = D3DCompile(ComputeShaderCode1x1, strlen(ComputeShaderCode1x1), "<CS_SOURCE>", nullptr, nullptr, "CSMain", "cs_5_0", CompilerFlags, 0, &CSByteCode1x1, &ErrorMsg);
+	if (ErrorMsg)
+	{
+		const char* ErrMsgStr = (const char*)ErrorMsg->GetBufferPointer();
+		OutputDebugStringA(ErrMsgStr);
+	}
+	ASSERT(SUCCEEDED(hr));
 
-	ID3D12RootSignature* PixelRootSig = CreatePixelRootSig(Device);
-	ID3D12PipelineState* PixelPSO = CreatePixelPSO(Device, PixelRootSig, DXGI_FORMAT_B8G8R8A8_UNORM, VSByteCode, PSByteCode);
+	hr = D3DCompile(ComputeShaderCode2x2, strlen(ComputeShaderCode2x2), "<CS_SOURCE>", nullptr, nullptr, "CSMain", "cs_5_0", CompilerFlags, 0, &CSByteCode2x2, &ErrorMsg);
+	if (ErrorMsg)
+	{
+		const char* ErrMsgStr = (const char*)ErrorMsg->GetBufferPointer();
+		OutputDebugStringA(ErrMsgStr);
+	}
+	ASSERT(SUCCEEDED(hr));
+
+	hr = D3DCompile(ComputeShaderCode4x4, strlen(ComputeShaderCode4x4), "<CS_SOURCE>", nullptr, nullptr, "CSMain", "cs_5_0", CompilerFlags, 0, &CSByteCode4x4, &ErrorMsg);
+	if (ErrorMsg)
+	{
+		const char* ErrMsgStr = (const char*)ErrorMsg->GetBufferPointer();
+		OutputDebugStringA(ErrMsgStr);
+	}
+	ASSERT(SUCCEEDED(hr));
+
+	hr = D3DCompile(ComputeShaderCode8x8, strlen(ComputeShaderCode8x8), "<CS_SOURCE>", nullptr, nullptr, "CSMain", "cs_5_0", CompilerFlags, 0, &CSByteCode8x8, &ErrorMsg);
+	if (ErrorMsg)
+	{
+		const char* ErrMsgStr = (const char*)ErrorMsg->GetBufferPointer();
+		OutputDebugStringA(ErrMsgStr);
+	}
+	ASSERT(SUCCEEDED(hr));
+
+	hr = D3DCompile(ComputeShaderCode16x16, strlen(ComputeShaderCode16x16), "<CS_SOURCE>", nullptr, nullptr, "CSMain", "cs_5_0", CompilerFlags, 0, &CSByteCode16x16, &ErrorMsg);
+	if (ErrorMsg)
+	{
+		const char* ErrMsgStr = (const char*)ErrorMsg->GetBufferPointer();
+		OutputDebugStringA(ErrMsgStr);
+	}
+	ASSERT(SUCCEEDED(hr));
 
 	ID3D12CommandQueue* CommandQueue = nullptr;
 
@@ -675,8 +870,15 @@ int main(int argc, char** argv) {
 
 		Timer.Init(Device);
 
+
 		// Pixel Shader Copy
 		{
+			double TotalPSCopyTimeUsec = 0.0;
+			const int PSCopyIters = 16*1024;
+
+			ID3D12RootSignature* PixelRootSig = CreatePixelRootSig(Device);
+			ID3D12PipelineState* PixelPSO = CreatePixelPSO(Device, PixelRootSig, DXGI_FORMAT_B8G8R8A8_UNORM, VSByteCode, PSByteCode);
+
 			ID3D12Resource* DestResource = AllocateTexture(Device, RTWidth, RTHeight, DXGI_FORMAT_B8G8R8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
 			ID3D12Resource* SrcResource = AllocateTexture(Device, RTWidth, RTHeight, DXGI_FORMAT_B8G8R8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
@@ -686,8 +888,8 @@ int main(int argc, char** argv) {
 
 			ID3D12Resource* ReadbackRT = AllocateReadbackTexture(Device, TexBufferSize);
 
-			SetTextureUploadRandomBytes(UploadSource, TexBufferSize, RTWidth, RTHeight, RTWidth * bpp);
-			UploadTextureResource(CommandList, UploadSource, SrcResource, RTWidth, RTHeight, RTWidth * bpp);
+			SetTextureUploadRandomBytes("pixel_shader_source.png", UploadSource, TexBufferSize, RTWidth, RTHeight, RTWidth* bpp);
+			UploadTextureResource(CommandList, UploadSource, SrcResource, RTWidth, RTHeight, RTWidth * bpp, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
 			D3D12_DESCRIPTOR_HEAP_DESC DescriptorHeapDesc = {};
 			DescriptorHeapDesc.NumDescriptors = 1;
@@ -698,7 +900,6 @@ int main(int argc, char** argv) {
 
 			D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = DescriptorHeap->GetCPUDescriptorHandleForHeapStart();
 			Device->CreateRenderTargetView(DestResource, nullptr, rtvHandle);
-
 
 			ID3D12DescriptorHeap* SrcSRV = GetSRVHeapForTexture(Device, SrcResource);
 
@@ -723,7 +924,7 @@ int main(int argc, char** argv) {
 
 			// CommandList State
 
-			for (int iter = 0; iter < 1024; iter++)
+			for (int iter = 0; iter < PSCopyIters; iter++)
 			{
 				CommandList->SetPipelineState(PixelPSO);
 				CommandList->SetGraphicsRootSignature(PixelRootSig);
@@ -752,7 +953,7 @@ int main(int argc, char** argv) {
 				Timer.EndTiming(CommandList);
 
 				// Copy render target data to readback texture
-				//CopyRenderTargetDataToReadback(CommandList, DestResource, ReadbackRT, RTWidth, RTHeight, RTWidth * bpp);
+				//CopyRenderTargetDataToReadback(CommandList, DestResource, ReadbackRT, RTWidth, RTHeight, RTWidth * bpp, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
 				CommandList->Close();
 
@@ -768,7 +969,7 @@ int main(int argc, char** argv) {
 
 				NextValueToSignal++;
 
-				//WriteReadbackToFile(ReadbackRT, RTWidth, RTHeight);
+				//WriteReadbackToFile("pixel_shader_dest.png", ReadbackRT, RTWidth, RTHeight);
 
 				uint64_t StartTS = 0;
 				uint64_t EndTS = 0;
@@ -776,15 +977,181 @@ int main(int argc, char** argv) {
 
 				uint64_t TotalTS = EndTS - StartTS;
 				double TotalUsec = ((double)TotalTS) / TimestampFreq * (1000.0 * 1000.0);
-				LOG("Took %5.1f usec (%llu ticks) for pixel shader copy (%4d x %4d)", TotalUsec, TotalTS, RTWidth, RTHeight);
+				//LOG("Took %5.1f usec (%llu ticks) for pixel shader copy (%4d x %4d)", TotalUsec, TotalTS, RTWidth, RTHeight);
+
+				TotalPSCopyTimeUsec += TotalUsec;
 
 				CommandList->Reset(CommandAllocator, nullptr);
 			}
+
+			DestResource->Release();
+			SrcResource->Release();
+			ReadbackRT->Release();
+			UploadSource->Release();
+
+			double AvgPSCopyTimeUsec = TotalPSCopyTimeUsec / PSCopyIters;
+			LOG("PS Copy of %4d x %4d texture: avg %6.1f usec (%d iters)", RTWidth, RTHeight, AvgPSCopyTimeUsec, PSCopyIters);
 		}
 
-		// Since executing a command list will be asynchronous on another thread,
-		// wait a second so that the async work can hit the bug
-		//Sleep(1000);
+		auto DoCSCopyTest = [&](int GroupSize, ID3DBlob* CSByteCode)
+		{
+			double TotalCSCopyTimeUsec = 0.0;
+			const int CSCopyIters = 16 * 1024;
+
+			// Compute shader copy
+			{
+				ID3D12RootSignature* RootSig = CreateComputeRootSig(Device);
+
+				ID3D12PipelineState* PSO1x1 = CreateComputePSO(Device, RootSig, CSByteCode);
+
+				ID3D12Resource* DestResource = AllocateTexture(Device, RTWidth, RTHeight, DXGI_FORMAT_B8G8R8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+				ID3D12Resource* SrcResource = AllocateTexture(Device, RTWidth, RTHeight, DXGI_FORMAT_B8G8R8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+
+				int bpp = 4;
+				int TexBufferSize = RTWidth * RTHeight * bpp;
+				ID3D12Resource* UploadSource = AllocateUploadTexture(Device, TexBufferSize);
+
+				ID3D12Resource* ReadbackRT = AllocateReadbackTexture(Device, TexBufferSize);
+
+				SetTextureUploadRandomBytes("compute_shader_source.png", UploadSource, TexBufferSize, RTWidth, RTHeight, RTWidth * bpp);
+				UploadTextureResource(CommandList, UploadSource, SrcResource, RTWidth, RTHeight, RTWidth * bpp, D3D12_RESOURCE_STATE_GENERIC_READ);
+
+				ID3D12DescriptorHeap* DescriptorHeap = GetSRVUAVHeapForTextures(Device, SrcResource, DestResource);
+
+				for (int iter = 0; iter < CSCopyIters; iter++)
+				{
+
+					CommandList->SetPipelineState(PSO1x1);
+					CommandList->SetComputeRootSignature(RootSig);
+
+					CommandList->SetDescriptorHeaps(1, &DescriptorHeap);
+					CommandList->SetComputeRootDescriptorTable(0, DescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
+					D3D12_GPU_DESCRIPTOR_HANDLE GPUHandle = DescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+					GPUHandle.ptr += Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+					CommandList->SetComputeRootDescriptorTable(1, GPUHandle);
+
+					Timer.StartTiming(CommandList);
+
+					CommandList->Dispatch(RTWidth / GroupSize, RTHeight / GroupSize, 1);
+
+					Timer.EndTiming(CommandList);
+
+					CopyRenderTargetDataToReadback(CommandList, DestResource, ReadbackRT, RTWidth, RTHeight, RTWidth * bpp, D3D12_RESOURCE_STATE_COPY_DEST);
+
+					CommandList->Close();
+
+					ID3D12CommandList* CommandLists[] = { CommandList };
+					CommandQueue->ExecuteCommandLists(1, CommandLists);
+
+					CommandQueue->Signal(ExecFence, NextValueToSignal);
+
+					HANDLE hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+					ExecFence->SetEventOnCompletion(NextValueToSignal, hEvent);
+					WaitForSingleObject(hEvent, INFINITE);
+					CloseHandle(hEvent);
+
+					NextValueToSignal++;
+
+					//WriteReadbackToFile("compute_shader_dest.png", ReadbackRT, RTWidth, RTHeight);
+
+					uint64_t StartTS = 0;
+					uint64_t EndTS = 0;
+					Timer.GetTiming(&StartTS, &EndTS);
+
+					uint64_t TotalTS = EndTS - StartTS;
+					double TotalUsec = ((double)TotalTS) / TimestampFreq * (1000.0 * 1000.0);
+					//LOG("Took %5.1f usec (%llu ticks) for compute shader copy (%dx%d) (%4d x %4d)", TotalUsec, TotalTS, GroupSize, GroupSize RTWidth, RTHeight);
+
+					TotalCSCopyTimeUsec += TotalUsec;
+
+					CommandList->Reset(CommandAllocator, nullptr);
+				}
+
+				DestResource->Release();
+				SrcResource->Release();
+				ReadbackRT->Release();
+				UploadSource->Release();
+			}
+
+			double AvgCSCopyTimeUsec = TotalCSCopyTimeUsec / CSCopyIters;
+			LOG("CS Copy (%2dx%2d) of %4d x %4d texture: avg %6.1f usec (%d iters)", GroupSize, GroupSize, RTWidth, RTHeight, AvgCSCopyTimeUsec, CSCopyIters);
+		};
+
+		DoCSCopyTest(1,  CSByteCode1x1);
+		DoCSCopyTest(2,  CSByteCode2x2);
+		DoCSCopyTest(4,  CSByteCode4x4);
+		DoCSCopyTest(8,  CSByteCode8x8);
+		DoCSCopyTest(16, CSByteCode16x16);
+
+		// Resource Copy
+		{
+			double TotalResCopyTimeUsec = 0.0;
+			const int ResCopyIters = 16 * 1024;
+
+			ID3D12RootSignature* PixelRootSig = CreatePixelRootSig(Device);
+			ID3D12PipelineState* PixelPSO = CreatePixelPSO(Device, PixelRootSig, DXGI_FORMAT_B8G8R8A8_UNORM, VSByteCode, PSByteCode);
+
+			ID3D12Resource* DestResource = AllocateTexture(Device, RTWidth, RTHeight, DXGI_FORMAT_B8G8R8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
+			ID3D12Resource* SrcResource = AllocateTexture(Device, RTWidth, RTHeight, DXGI_FORMAT_B8G8R8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+			int bpp = 4;
+			int TexBufferSize = RTWidth * RTHeight * bpp;
+			ID3D12Resource* UploadSource = AllocateUploadTexture(Device, TexBufferSize);
+
+			ID3D12Resource* ReadbackRT = AllocateReadbackTexture(Device, TexBufferSize);
+
+			SetTextureUploadRandomBytes("resrouce_copy_source.png", UploadSource, TexBufferSize, RTWidth, RTHeight, RTWidth * bpp);
+			UploadTextureResource(CommandList, UploadSource, SrcResource, RTWidth, RTHeight, RTWidth * bpp, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+			// CommandList State
+			for (int iter = 0; iter < ResCopyIters; iter++)
+			{
+				Timer.StartTiming(CommandList);
+
+				CommandList->CopyResource(DestResource, SrcResource);
+
+				Timer.EndTiming(CommandList);
+
+				CopyRenderTargetDataToReadback(CommandList, DestResource, ReadbackRT, RTWidth, RTHeight, RTWidth* bpp, D3D12_RESOURCE_STATE_COPY_DEST);
+
+				CommandList->Close();
+
+				ID3D12CommandList* CommandLists[] = { CommandList };
+				CommandQueue->ExecuteCommandLists(1, CommandLists);
+
+				CommandQueue->Signal(ExecFence, NextValueToSignal);
+
+				HANDLE hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+				ExecFence->SetEventOnCompletion(NextValueToSignal, hEvent);
+				WaitForSingleObject(hEvent, INFINITE);
+				CloseHandle(hEvent);
+
+				NextValueToSignal++;
+
+				//WriteReadbackToFile("resrouce_copy_dest.png", ReadbackRT, RTWidth, RTHeight);
+
+				uint64_t StartTS = 0;
+				uint64_t EndTS = 0;
+				Timer.GetTiming(&StartTS, &EndTS);
+
+				uint64_t TotalTS = EndTS - StartTS;
+				double TotalUsec = ((double)TotalTS) / TimestampFreq * (1000.0 * 1000.0);
+				//LOG("Took %5.1f usec (%llu ticks) for pixel shader copy (%4d x %4d)", TotalUsec, TotalTS, RTWidth, RTHeight);
+
+				TotalResCopyTimeUsec += TotalUsec;
+
+				CommandList->Reset(CommandAllocator, nullptr);
+			}
+
+			DestResource->Release();
+			SrcResource->Release();
+			ReadbackRT->Release();
+			UploadSource->Release();
+
+			double AvgResCopyTimeUsec = TotalResCopyTimeUsec / ResCopyIters;
+			LOG("Resource Copy of %4d x %4d texture: avg %6.1f usec (%d iters)", RTWidth, RTHeight, AvgResCopyTimeUsec, ResCopyIters);
+		}
 	}
 
 
